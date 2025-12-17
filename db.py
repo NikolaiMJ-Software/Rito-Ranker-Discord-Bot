@@ -140,3 +140,151 @@ async def remove_riot_account_by_puuid(discord_user_id: int, puuid: str) -> int:
         )
         await db.commit()
         return cur.rowcount
+
+
+async def ensure_guild_settings(guild_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            "INSERT OR IGNORE INTO guild_settings(guild_id) VALUES(?)",
+            (str(guild_id),)
+        )
+        await conn.commit()
+
+async def get_guild_settings(guild_id: int) -> dict:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute("SELECT * FROM guild_settings WHERE guild_id = ?", (str(guild_id),))
+        row = await cur.fetchone()
+        return dict(row) if row else {}
+
+async def set_leaderboard_message(guild_id: int, channel_id: int, message_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            """
+            UPDATE guild_settings
+            SET leaderboard_channel_id = ?, leaderboard_message_id = ?
+            WHERE guild_id = ?
+            """,
+            (str(channel_id), str(message_id), str(guild_id)),
+        )
+        await conn.commit()
+
+async def set_refresh_schedule(guild_id: int, refresh_weekday: int, refresh_hour: int, refresh_minute: int,
+                              refresh_tz: str, next_refresh_ts: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            """
+            UPDATE guild_settings
+            SET refresh_weekday=?, refresh_hour=?, refresh_minute=?, refresh_tz=?, next_refresh_ts=?
+            WHERE guild_id=?
+            """,
+            (refresh_weekday, refresh_hour, refresh_minute, refresh_tz, next_refresh_ts, str(guild_id)),
+        )
+        await conn.commit()
+
+async def set_next_refresh_ts(guild_id: int, next_ts: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            "UPDATE guild_settings SET next_refresh_ts=? WHERE guild_id=?",
+            (next_ts, str(guild_id)),
+        )
+        await conn.commit()
+
+async def set_last_refresh_ts(guild_id: int, last_ts: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            "UPDATE guild_settings SET last_refresh_ts=? WHERE guild_id=?",
+            (last_ts, str(guild_id)),
+        )
+        await conn.commit()
+
+async def list_guild_refresh_due(now_ts: int) -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            """
+            SELECT *
+            FROM guild_settings
+            WHERE next_refresh_ts IS NOT NULL
+              AND next_refresh_ts <= ?
+            """,
+            (now_ts,),
+        )
+        rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+async def get_guild_leaderboard_rows(guild_member_ids: list[str], season_key: str) -> list[tuple[str, int]]:
+    """
+    Returns (discord_user_id, total_games) for users in this guild.
+    Sums across all their linked riot_accounts, using account_stats.
+    """
+    if not guild_member_ids:
+        return []
+
+    placeholders = ",".join("?" for _ in guild_member_ids)
+
+    sql = f"""
+    SELECT ra.discord_user_id AS discord_user_id,
+           COALESCE(SUM(s.games_played), 0) AS total_games
+    FROM riot_accounts ra
+    LEFT JOIN account_stats s
+      ON s.account_id = ra.id
+     AND s.season_key = ?
+    WHERE ra.discord_user_id IN ({placeholders})
+    GROUP BY ra.discord_user_id
+    """
+
+    params = [season_key, *guild_member_ids]
+
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cur = await conn.execute(sql, params)
+        rows = await cur.fetchall()
+        return [(r[0], int(r[1])) for r in rows]
+    
+    
+async def upsert_account_stats(account_id: int, season_key: str, games_played: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            """
+            INSERT INTO account_stats(account_id, season_key, games_played, last_updated)
+            VALUES(?, ?, ?, ?)
+            ON CONFLICT(account_id) DO UPDATE SET
+                season_key=excluded.season_key,
+                games_played=excluded.games_played,
+                last_updated=excluded.last_updated
+            """,
+            (account_id, season_key, games_played, int(time.time())),
+        )
+        await conn.commit()
+
+
+async def set_season(guild_id: int, season_key: str, season_start_ts: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            """
+            UPDATE guild_settings
+            SET season_key=?, season_start_ts=?
+            WHERE guild_id=?
+            """,
+            (season_key, season_start_ts, str(guild_id)),
+        )
+        await conn.commit()
+
+
+async def list_accounts_for_users(discord_user_ids: list[str]) -> list[tuple[int, str, str]]:
+    """
+    Returns list of (account_id, puuid, platform) for the given Discord user IDs.
+    """
+    if not discord_user_ids:
+        return []
+
+    placeholders = ",".join("?" for _ in discord_user_ids)
+    sql = f"""
+    SELECT id, puuid, platform
+    FROM riot_accounts
+    WHERE discord_user_id IN ({placeholders})
+    """
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cur = await conn.execute(sql, discord_user_ids)
+        rows = await cur.fetchall()
+        return [(int(r[0]), str(r[1]), str(r[2])) for r in rows]
