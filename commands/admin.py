@@ -8,8 +8,8 @@ from discord.ext import commands
 from discord import app_commands
 
 import db
-from utils_schedule import compute_next_refresh_ts
-from utils_window import compute_window_start_ts, make_window_key
+from utilities.utils_schedule import compute_next_refresh_ts
+from utilities.utils_window import compute_window_start_ts, make_window_key
 from leaderboard import refresh_leaderboard_for_guild
 from stats_update import update_stats_for_guild
 
