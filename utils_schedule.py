@@ -16,6 +16,11 @@ def compute_next_refresh_ts(
     """
     tz = ZoneInfo(tz_name)
 
+    if weekday < 0 or weekday > 6:
+        raise ValueError("weekday must be 0..6")
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        raise ValueError("hour/minute invalid")
+
     # Convert now to local time
     now_local = now_utc.astimezone(tz)
 

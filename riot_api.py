@@ -1,59 +1,48 @@
 import aiohttp
 from urllib.parse import quote
 
-class RiotAPIError(Exception):
-    pass
-
-class RiotNotFound(RiotAPIError):
-    pass
-
-class RiotUnauthorized(RiotAPIError):
-    pass
-
-class RiotRateLimited(RiotAPIError):
-    def __init__(self, retry_after: float | None = None):
-        super().__init__("Rate limited")
+class RiotNotFound(Exception): ...
+class RiotUnauthorized(Exception): ...
+class RiotRateLimited(Exception):
+    def __init__(self, retry_after: int | None = None):
         self.retry_after = retry_after
 
-async def get_puuid_by_riot_id(api_key: str, riot_id: str, region_cluster: str = "europe") -> tuple[str, str, str]:
-    """
-    Returns (puuid, gameName, tagLine) for a Riot ID like 'GameName#TAG'.
+async def get_puuid_by_riot_id(api_key: str, riot_id: str, region_cluster: str = "europe"):
+    api_key = (api_key or "").strip()
+    if not api_key:
+        raise RiotUnauthorized()
 
-    region_cluster: 'americas' | 'asia' | 'europe'
-    Account-V1 supports these routing values and can query any account; using nearest is recommended. :contentReference[oaicite:1]{index=1}
-    """
+    # riot_id: "GameName#TAG"
     if "#" not in riot_id:
-        raise ValueError("Riot ID must look like GameName#TAG")
+        raise RiotNotFound()
 
     game_name, tag_line = riot_id.split("#", 1)
-    game_name = game_name.strip()
-    tag_line = tag_line.strip()
+    game_name = quote(game_name.strip(), safe="")
+    tag_line = quote(tag_line.strip(), safe="")
 
-    if not game_name or not tag_line:
-        raise ValueError("Riot ID must look like GameName#TAG")
-
-    # URL encode (names can include spaces/special chars)
-    game_q = quote(game_name, safe="")
-    tag_q = quote(tag_line, safe="")
-
-    url = f"https://{region_cluster}.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{game_q}/{tag_q}"
+    url = f"https://{region_cluster}.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{game_name}/{tag_line}"
     headers = {"X-Riot-Token": api_key}
 
     async with aiohttp.ClientSession() as session:
         async with session.get(url, headers=headers) as resp:
+            text = await resp.text()
+
+            # ✅ DEBUG: print the real result from Riot
+            print(f"[RiotAPI] GET {url} -> {resp.status} | body={text[:200]}")
+
             if resp.status == 200:
                 data = await resp.json()
                 return data["puuid"], data["gameName"], data["tagLine"]
 
-            if resp.status == 401 or resp.status == 403:
-                raise RiotUnauthorized(f"Riot API auth error ({resp.status})")
+            if resp.status in (401, 403):
+                raise RiotUnauthorized()
 
             if resp.status == 404:
-                raise RiotNotFound("Riot ID not found")
+                raise RiotNotFound()
 
             if resp.status == 429:
-                retry_after = resp.headers.get("Retry-After")
-                raise RiotRateLimited(float(retry_after) if retry_after else None)
+                ra = resp.headers.get("Retry-After")
+                raise RiotRateLimited(int(ra) if ra and ra.isdigit() else None)
 
-            text = await resp.text()
-            raise RiotAPIError(f"Riot API error {resp.status}: {text[:200]}")
+            resp.raise_for_status()
+

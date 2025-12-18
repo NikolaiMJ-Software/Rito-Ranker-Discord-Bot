@@ -213,60 +213,42 @@ async def list_guild_refresh_due(now_ts: int) -> list[dict]:
         rows = await cur.fetchall()
         return [dict(r) for r in rows]
 
-async def get_guild_leaderboard_rows(guild_member_ids: list[str], season_key: str) -> list[tuple[str, int]]:
-    """
-    Returns (discord_user_id, total_games) for users in this guild.
-    Sums across all their linked riot_accounts, using account_stats.
-    """
+async def get_guild_leaderboard_rows(guild_member_ids: list[str], window_key: str) -> list[tuple[str, int]]:
     if not guild_member_ids:
         return []
 
     placeholders = ",".join("?" for _ in guild_member_ids)
-
     sql = f"""
-    SELECT ra.discord_user_id AS discord_user_id,
+    SELECT ra.discord_user_id,
            COALESCE(SUM(s.games_played), 0) AS total_games
     FROM riot_accounts ra
     LEFT JOIN account_stats s
       ON s.account_id = ra.id
-     AND s.season_key = ?
+     AND s.window_key = ?
     WHERE ra.discord_user_id IN ({placeholders})
     GROUP BY ra.discord_user_id
+    ORDER BY total_games DESC
     """
 
-    params = [season_key, *guild_member_ids]
-
+    params = [window_key, *guild_member_ids]
     async with aiosqlite.connect(DB_PATH) as conn:
         cur = await conn.execute(sql, params)
         rows = await cur.fetchall()
         return [(r[0], int(r[1])) for r in rows]
+
     
     
-async def upsert_account_stats(account_id: int, season_key: str, games_played: int) -> None:
+async def upsert_account_stats(account_id: int, window_key: str, games_played: int) -> None:
     async with aiosqlite.connect(DB_PATH) as conn:
         await conn.execute(
             """
-            INSERT INTO account_stats(account_id, season_key, games_played, last_updated)
+            INSERT INTO account_stats(account_id, window_key, games_played, last_updated)
             VALUES(?, ?, ?, ?)
-            ON CONFLICT(account_id) DO UPDATE SET
-                season_key=excluded.season_key,
+            ON CONFLICT(account_id, window_key) DO UPDATE SET
                 games_played=excluded.games_played,
                 last_updated=excluded.last_updated
             """,
-            (account_id, season_key, games_played, int(time.time())),
-        )
-        await conn.commit()
-
-
-async def set_season(guild_id: int, season_key: str, season_start_ts: int) -> None:
-    async with aiosqlite.connect(DB_PATH) as conn:
-        await conn.execute(
-            """
-            UPDATE guild_settings
-            SET season_key=?, season_start_ts=?
-            WHERE guild_id=?
-            """,
-            (season_key, season_start_ts, str(guild_id)),
+            (account_id, window_key, games_played, int(time.time())),
         )
         await conn.commit()
 
@@ -288,3 +270,102 @@ async def list_accounts_for_users(discord_user_ids: list[str]) -> list[tuple[int
         cur = await conn.execute(sql, discord_user_ids)
         rows = await cur.fetchall()
         return [(int(r[0]), str(r[1]), str(r[2])) for r in rows]
+
+async def set_window_mode(guild_id: int, mode: str, tz_name: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            "UPDATE guild_settings SET window_mode=?, window_tz=? WHERE guild_id=?",
+            (mode, tz_name, str(guild_id))
+        )
+        await conn.commit()
+
+async def set_window_since_ts(guild_id: int, since_ts: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            "UPDATE guild_settings SET window_since_ts=? WHERE guild_id=?",
+            (since_ts, str(guild_id))
+        )
+        await conn.commit()
+
+async def get_snapshot_map(guild_id: int, window_key: str) -> dict[str, tuple[int, int]]:
+    """
+    Returns {discord_user_id: (rank, games_played)} for previous snapshot.
+    """
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cur = await conn.execute(
+            """
+            SELECT discord_user_id, rank, games_played
+            FROM leaderboard_snapshots
+            WHERE guild_id = ? AND window_key = ?
+            """,
+            (str(guild_id), window_key),
+        )
+        rows = await cur.fetchall()
+        return {str(r[0]): (int(r[1]), int(r[2])) for r in rows}
+
+
+async def upsert_snapshot_row(guild_id: int, window_key: str, discord_user_id: str, rank: int, games: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            """
+            INSERT INTO leaderboard_snapshots(guild_id, window_key, discord_user_id, rank, games_played, updated_at)
+            VALUES(?, ?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id, window_key, discord_user_id) DO UPDATE SET
+                rank=excluded.rank,
+                games_played=excluded.games_played,
+                updated_at=excluded.updated_at
+            """,
+            (str(guild_id), window_key, str(discord_user_id), rank, games, int(time.time())),
+        )
+        await conn.commit()
+
+
+async def set_queue_policy(guild_id: int, policy: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            "UPDATE guild_settings SET queue_policy=? WHERE guild_id=?",
+            (policy, str(guild_id)),
+        )
+        await conn.commit()
+
+
+async def get_match_meta(match_id: str) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            "SELECT * FROM match_meta WHERE match_id = ?",
+            (match_id,),
+        )
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+async def upsert_match_meta(
+    match_id: str,
+    queue_id: int | None,
+    game_mode: str | None,
+    game_type: str | None,
+    game_creation: int | None,
+) -> None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            """
+            INSERT INTO match_meta(match_id, queue_id, game_mode, game_type, game_creation, fetched_at)
+            VALUES(?, ?, ?, ?, ?, ?)
+            ON CONFLICT(match_id) DO UPDATE SET
+              queue_id=excluded.queue_id,
+              game_mode=excluded.game_mode,
+              game_type=excluded.game_type,
+              game_creation=excluded.game_creation,
+              fetched_at=excluded.fetched_at
+            """,
+            (
+                match_id,
+                queue_id,
+                game_mode,
+                game_type,
+                game_creation,
+                int(time.time()),
+            ),
+        )
+        await conn.commit()
