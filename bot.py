@@ -21,7 +21,7 @@ async def on_ready():
 
 
 async def load_cogs():
-    for ext in ["commands.general", "commands.accounts", "commands.scheduler", "commands.admin"]:
+    for ext in ["commands.general", "commands.accounts", "commands.scheduler", "commands.admin", "commands.leaderboard_commands"]:
         try:
             await bot.load_extension(ext)
             print(f"Loaded {ext}")
