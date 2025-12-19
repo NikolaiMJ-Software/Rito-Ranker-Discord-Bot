@@ -1,27 +1,34 @@
+# bot.py
+import asyncio
 import discord
 from discord.ext import commands
 
-from key import BOT_KEY
 import db
+from key import BOT_KEY
 
 intents = discord.Intents.default()
-intents.members = True
+intents.members = True  
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-GUILD_ID = 252488961493041154  # your server id
 
 @bot.event
 async def on_ready():
     await db.init_db()
-    guild = discord.Object(id=GUILD_ID)
-    bot.tree.copy_global_to(guild=guild)
-    synced = await bot.tree.sync(guild=guild)
-    print(f"Synced {len(synced)} commands to guild {GUILD_ID}")
+
+    # Global sync (all servers)
+    synced = await bot.tree.sync()
+    print(f"Synced {len(synced)} global commands as {bot.user} ({bot.user.id})")
 
 
 async def load_cogs():
-    for ext in ["commands.general", "commands.accounts", "commands.scheduler", "commands.admin", "commands.leaderboard_commands"]:
+    for ext in [
+        "commands.general",
+        "commands.accounts",
+        "commands.scheduler",
+        "commands.admin",
+        "commands.leaderboard_commands",
+    ]:
         try:
             await bot.load_extension(ext)
             print(f"Loaded {ext}")
@@ -29,12 +36,10 @@ async def load_cogs():
             print(f"FAILED to load {ext}: {e}")
 
 
-# Python 3.10+ recommended entrypoint
 async def main():
     async with bot:
         await load_cogs()
         await bot.start(BOT_KEY)
 
-import asyncio
-asyncio.run(main())
 
+asyncio.run(main())
