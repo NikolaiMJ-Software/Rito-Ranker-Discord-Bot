@@ -369,3 +369,27 @@ async def upsert_match_meta(
             ),
         )
         await conn.commit()
+
+async def get_account_label(account_id: int) -> str:
+    """
+    Returns a human-readable label for logs, e.g.
+    "Nick#EUW (EUW1) acc_id=12 puuid=abcd1234..."
+    """
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cur = await conn.execute(
+            """
+            SELECT id, puuid, riot_id, platform
+            FROM riot_accounts
+            WHERE id = ?
+            """,
+            (account_id,),
+        )
+        row = await cur.fetchone()
+        if not row:
+            return f"acc_id={account_id} (missing)"
+
+        acc_id, puuid, riot_id, platform = row
+        short = (puuid or "")[:8]
+        riot_txt = riot_id or "unknown#????"
+        plat_txt = platform or "unknown"
+        return f"{riot_txt} ({plat_txt}) acc_id={acc_id} puuid={short}..."

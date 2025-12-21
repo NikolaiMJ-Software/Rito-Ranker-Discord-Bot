@@ -19,6 +19,14 @@ try:
 except Exception:
     RIOT_API_KEY = None
 
+# Riot API helper imports
+from riot_api import get_puuid_by_riot_id, RiotNotFound, RiotUnauthorized, RiotRateLimited
+
+# Platforms you support (must exist because /adminlink uses it)
+PLATFORMS = [
+    "EUW1", "EUN1", "NA1", "KR", "JP1",
+    "BR1", "LA1", "LA2", "OC1", "TR1", "RU"
+]
 
 WEEKDAYS = [
     ("monday", 0), ("tuesday", 1), ("wednesday", 2), ("thursday", 3),
@@ -36,6 +44,17 @@ QUEUE_POLICIES = [
     ("ranked_only", "ranked_only"),
     ("ranked_normal", "ranked_normal"),
 ]
+
+REGION_CLUSTERS = ["europe", "americas", "asia", "sea"]
+
+
+async def resolve_puuid_any_cluster(api_key: str, riot_id: str):
+    for cluster in REGION_CLUSTERS:
+        try:
+            return await get_puuid_by_riot_id(api_key, riot_id, region_cluster=cluster)
+        except RiotNotFound:
+            continue
+    raise RiotNotFound()
 
 
 @app_commands.default_permissions(administrator=True)
@@ -79,14 +98,12 @@ class Admin(commands.Cog):
         await interaction.response.defer(ephemeral=True)
         await db.ensure_guild_settings(interaction.guild_id)
 
-        # Create message to edit later
         msg = await channel.send("📊 Leaderboard initializing…")
         await db.set_leaderboard_message(interaction.guild_id, channel.id, msg.id)
 
-        # Compute window
         window_key, window_start_ts, mode, tz_name = await self._compute_window(interaction.guild_id)
 
-        # Optional: fetch stats right away so it shows real data immediately
+        # Optional: fetch stats immediately for first render
         if RIOT_API_KEY:
             gs = await db.get_guild_settings(interaction.guild_id)
             queue_policy = (gs.get("queue_policy") or "all").strip().lower()
@@ -100,7 +117,6 @@ class Admin(commands.Cog):
                 max_concurrency=2,
             )
 
-        # Render leaderboard
         await refresh_leaderboard_for_guild(self.bot, interaction.guild_id, window_key)
 
         await interaction.followup.send(
@@ -109,7 +125,7 @@ class Admin(commands.Cog):
             ephemeral=True,
         )
 
-    # ---------------- Refresh schedule (when to update) ----------------
+    # ---------------- Refresh schedule ----------------
     @app_commands.command(name="setrefresh", description="Set weekly refresh schedule (Copenhagen time).")
     @app_commands.describe(weekday="monday..sunday", hour="0-23", minute="0-59")
     @app_commands.choices(weekday=[app_commands.Choice(name=name, value=val) for name, val in WEEKDAYS])
@@ -149,7 +165,7 @@ class Admin(commands.Cog):
             ephemeral=True,
         )
 
-    # ---------------- Window preference (what to count) ----------------
+    # ---------------- Window preference ----------------
     @app_commands.command(name="setwindow", description="Set leaderboard window mode (week/month/year).")
     @app_commands.choices(mode=[app_commands.Choice(name=n, value=v) for n, v in WINDOW_MODES])
     async def setwindow(self, interaction: discord.Interaction, mode: app_commands.Choice[str]):
@@ -200,7 +216,7 @@ class Admin(commands.Cog):
             ephemeral=True,
         )
 
-    # ---------------- Queue policy (what queues count) ----------------
+    # ---------------- Queue policy ----------------
     @app_commands.command(name="setqueues", description="Set what queues count (all / ranked only / ranked+normal).")
     @app_commands.choices(policy=[app_commands.Choice(name=n, value=v) for n, v in QUEUE_POLICIES])
     async def setqueues(self, interaction: discord.Interaction, policy: app_commands.Choice[str]):
@@ -210,12 +226,11 @@ class Admin(commands.Cog):
 
         await interaction.response.defer(ephemeral=True)
         await db.ensure_guild_settings(interaction.guild_id)
-
         await db.set_queue_policy(interaction.guild_id, policy.value)
 
         await interaction.followup.send(f"✅ Queue policy set to `{policy.value}`.", ephemeral=True)
 
-    # ---------------- Status + manual refresh ----------------
+    # ---------------- Manual refresh + status ----------------
     @app_commands.command(name="refreshstatus", description="Show this server's refresh + window setup.")
     async def refreshstatus(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -248,9 +263,6 @@ class Admin(commands.Cog):
             "📌 **Status**\n"
             f"- Leaderboard channel: {channel_txt}\n"
             f"- Leaderboard message: {msg_txt}\n"
-            f"- Refresh schedule: weekday={gs.get('refresh_weekday')} "
-            f"time={gs.get('refresh_hour', 0):02d}:{gs.get('refresh_minute', 0):02d} "
-            f"tz={gs.get('refresh_tz')}\n"
             f"- Next refresh: {next_txt}\n"
             f"- Last refresh: {last_txt}\n"
             f"- Window mode: `{mode}`\n"
@@ -299,6 +311,95 @@ class Admin(commands.Cog):
             f"Queues: `{queue_policy}`",
             ephemeral=True,
         )
+
+    # ---------------- Admin manage other users' links ----------------
+    @app_commands.command(name="adminaccounts", description="(Admin) Show linked Riot accounts for a specific user.")
+    @app_commands.describe(user="The Discord user to check")
+    async def adminaccounts(self, interaction: discord.Interaction, user: discord.Member):
+        if not self._is_admin(interaction):
+            await interaction.response.send_message("❌ Admins only.", ephemeral=True)
+            return
+
+        rows = await db.list_riot_accounts(user.id)
+        if not rows:
+            await interaction.response.send_message(f"ℹ️ {user.mention} has no linked accounts.", ephemeral=True)
+            return
+
+        lines = [
+            f"- ID `{acc_id}`: **{riot_id or 'unknown'}** ({platform or 'unknown'})"
+            for acc_id, _, riot_id, platform in rows
+        ]
+        await interaction.response.send_message(
+            f"📌 Linked accounts for {user.mention}:\n" + "\n".join(lines),
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="adminlink", description="(Admin) Link a Riot account to a specific Discord user.")
+    @app_commands.describe(user="Discord user", riot_id="Riot ID like GameName#TAG", platform="EUW1/EUN1/NA1 etc.")
+    @app_commands.choices(platform=[app_commands.Choice(name=p, value=p) for p in PLATFORMS])
+    async def adminlink(self, interaction: discord.Interaction, user: discord.Member, riot_id: str, platform: app_commands.Choice[str]):
+        if not self._is_admin(interaction):
+            await interaction.response.send_message("❌ Admins only.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        if not RIOT_API_KEY:
+            await interaction.followup.send("❌ RIOT_API_KEY missing.", ephemeral=True)
+            return
+
+        riot_id = riot_id.strip()
+        plat = platform.value
+
+        try:
+            puuid, game_name, tag_line = await resolve_puuid_any_cluster(RIOT_API_KEY, riot_id)
+            canonical_riot_id = f"{game_name}#{tag_line}"
+
+            inserted = await db.add_riot_account(
+                discord_user_id=user.id,
+                puuid=puuid,
+                riot_id=canonical_riot_id,
+                platform=plat,
+            )
+
+            if inserted:
+                await interaction.followup.send(
+                    f"✅ Linked **{canonical_riot_id}** on **{plat}** to {user.mention}.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.followup.send(
+                    "ℹ️ That Riot account (PUUID) is already linked somewhere.",
+                    ephemeral=True,
+                )
+
+        except RiotNotFound:
+            await interaction.followup.send("❌ Riot ID not found. Check spelling: `GameName#TAG`.", ephemeral=True)
+        except RiotUnauthorized:
+            await interaction.followup.send("❌ Riot API key invalid/expired or missing permissions.", ephemeral=True)
+        except RiotRateLimited as e:
+            msg = "⏳ Rate limited by Riot. Try again soon."
+            retry_after = getattr(e, "retry_after", None)
+            if retry_after:
+                msg += f" (Retry-After: {retry_after}s)"
+            await interaction.followup.send(msg, ephemeral=True)
+        except Exception as ex:
+            await interaction.followup.send(f"❌ adminlink failed: `{ex}`", ephemeral=True)
+
+    @app_commands.command(name="adminunlink", description="(Admin) Unlink a Riot account from a specific user by account ID.")
+    @app_commands.describe(user="Discord user", account_id="The ID shown in /adminaccounts")
+    async def adminunlink(self, interaction: discord.Interaction, user: discord.Member, account_id: int):
+        if not self._is_admin(interaction):
+            await interaction.response.send_message("❌ Admins only.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        removed = await db.remove_riot_account(user.id, account_id)
+        if removed:
+            await interaction.followup.send(f"🗑️ Unlinked account `{account_id}` from {user.mention}.", ephemeral=True)
+        else:
+            await interaction.followup.send(f"ℹ️ No account `{account_id}` found for {user.mention}.", ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
