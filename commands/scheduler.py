@@ -19,7 +19,6 @@ except Exception:
 
 
 def _shame_line(name: str, gained: int) -> str:
-    # Keep it playful / not mean
     if gained >= 40:
         return f"🫵 **{name}** gained **+{gained}**. Get a life ma man!"
     if gained >= 20:
