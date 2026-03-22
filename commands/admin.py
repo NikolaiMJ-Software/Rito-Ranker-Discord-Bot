@@ -13,6 +13,13 @@ from utilities.utils_window import compute_window_start_ts, make_window_key
 from leaderboard import refresh_leaderboard_for_guild
 from stats_update import update_stats_for_guild
 
+
+try:
+    from key import BOT_OWNER_IDS
+except Exception:
+    BOT_OWNER_IDS = set()
+
+
 # Riot API key (safe import so bot doesn't crash if missing)
 try:
     from key import RIOT_API_KEY
@@ -61,10 +68,13 @@ async def resolve_puuid_any_cluster(api_key: str, riot_id: str):
 class Admin(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-
+        
     def _is_admin(self, interaction: discord.Interaction) -> bool:
-        return interaction.user.guild_permissions.administrator
-
+        return (
+            interaction.user.id in BOT_OWNER_IDS
+            or interaction.user.guild_permissions.administrator
+        )
+        
     # ---------- helpers ----------
     async def _compute_window(self, guild_id: int) -> tuple[str, int, str, str]:
         """
